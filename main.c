@@ -18,8 +18,8 @@
 #include <sys/wait.h>
 
 #define CYCLES		1024
-#define FILECOUNT	16 * 1024
-#define FILESIZE	128 * 1024
+#define FILECOUNT	4 * 1024
+#define FILESIZE	32 * 1024
 #define FNAME		"file_%d"
 #define TEMPDIR		"temp_syscallmeter"
 
@@ -75,8 +75,12 @@ main(int argc,char **argv)
 	{
 		child = fork();
 		if (child == 0) {
-			child = getpid();
 			cpu_set_t mask;
+			double speed;
+			struct timespec ts_start, ts_end;
+
+			child = getpid();
+
 			CPU_ZERO(&mask);
 			CPU_SET(i, &mask);
 			err = sched_setaffinity(0, sizeof(cpu_set_t), &mask);
@@ -87,13 +91,26 @@ main(int argc,char **argv)
 			printf("[%d] I\'m on CPU: %d\n", child, sched_getcpu());
 			sem_post(&semaphores->fork_completed);
 			sem_wait(&semaphores->starting);
+			clock_gettime(CLOCK_MONOTONIC, &ts_start);
 			worker_job(i, dirfd);
-			printf("[%d] Worker is done\n", child);
+			clock_gettime(CLOCK_MONOTONIC, &ts_end);
+
+			ts_end.tv_sec = ts_end.tv_sec - ts_start.tv_sec;
+			ts_end.tv_nsec = ts_end.tv_nsec - ts_start.tv_nsec;
+			if (ts_end.tv_nsec < 0) {
+				ts_end.tv_nsec += 1000 * 1000 * 1000;
+				ts_end.tv_sec -= 1;
+			}
+
+			speed = (double)((long long)ts_end.tv_sec * 1000 * 1000 * 1000 + ts_end.tv_nsec) / (double)((long)FILECOUNT * (long)CYCLES);
+
+			printf("[%d] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
+					child, (long)FILECOUNT * (long)CYCLES,
+					(long long)ts_end.tv_sec, ts_end.tv_nsec, speed);
 			return 0;
 		}
 	}
 
-	printf("Waiting...\n");
 	for (int i = 0; i < ncpu; i++) {
 		sem_wait(&semaphores->fork_completed);
 	}
