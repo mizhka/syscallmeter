@@ -24,12 +24,12 @@
 #include <sys/wait.h>
 
 #define CPULIMIT_DEF	128
-#define CYCLES_DEF	1024
+#define CYCLES_DEF		1024
 #define FILECOUNT_DEF	4 * 1024
 #define FILESIZE_DEF	32 * 1024
-#define FNAME		"file_%d"
-#define TEMPDIR_DEF	"temp_syscallmeter"
-#define MODE_DEF        "open"
+#define FNAME		    "file_%d"
+#define TEMPDIR_DEF		"temp_syscallmeter"
+#define MODE_DEF            "open"
 
 typedef struct {
 	sem_t fork_completed;
@@ -49,7 +49,7 @@ static char* mode = MODE_DEF;
 #define FILECOUNT	file_count
 #define FILESIZE	file_size
 #define TEMPDIR		temp_dir
-#define MODE            mode
+#define MODE        mode
 
 
 static char* alloc_rndbytes(size_t size);
@@ -109,6 +109,7 @@ main(int argc,char **argv)
 			cpu_set_t mask;
 			double speed;
 			struct timespec ts_start, ts_end;
+            long ops_count;
 
 			child = getpid();
 
@@ -125,11 +126,20 @@ main(int argc,char **argv)
 			clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
             if (strcmp(MODE, "open") == 0)
+            {
                 worker_job_open(i, dirfd);
+                ops_count = (long)FILECOUNT * (long)CYCLES;
+            }
             else if (strcmp(MODE, "rename") == 0)
+            {
                 worker_job_rename(i, ncpu, dirfd);
+                ops_count = (long)(FILECOUNT / ncpu) * (long)CYCLES;
+            }
             else if (strcmp(MODE, "write_unlink") == 0)
+            {
                 worker_job_write_and_unlink(i, dirfd);
+                ops_count = (long)CYCLES;
+            }
             else
             {
                 printf("[%ld] Invalid job name %s, use -h to see valid job names.\n", i, MODE);
@@ -144,10 +154,10 @@ main(int argc,char **argv)
 				ts_end.tv_sec -= 1;
 			}
 
-			speed = (double)((long long)ts_end.tv_sec * 1000 * 1000 * 1000 + ts_end.tv_nsec) / (double)((long)FILECOUNT * (long)CYCLES);
+			speed = (double)((long long)ts_end.tv_sec * 1000 * 1000 * 1000 + ts_end.tv_nsec) / (double)(ops_count);
 
 			printf("[%d] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
-					child, (long)FILECOUNT * (long)CYCLES,
+					child, ops_count,
 					(long long)ts_end.tv_sec, ts_end.tv_nsec, speed);
 			return 0;
 		}
