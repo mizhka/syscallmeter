@@ -4,6 +4,9 @@
  *  Created on: Aug 14, 2024
  *      Author: mizhka
  */
+
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <semaphore.h>
@@ -11,12 +14,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/mman.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#define CPULIMIT	128
 #define CYCLES		1024
 #define FILECOUNT	4 * 1024
 #define FILESIZE	32 * 1024
@@ -70,6 +76,7 @@ main(int argc,char **argv)
 
 	ncpu = sysconf(_SC_NPROCESSORS_ONLN);
 	printf("Found %ld cores\n",ncpu);
+	ncpu = MIN(ncpu, CPULIMIT);
 
 	for(long i = 0; i < ncpu; i++)
 	{
