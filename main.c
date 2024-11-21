@@ -24,11 +24,12 @@
 #include <sys/wait.h>
 
 #define CPULIMIT_DEF	128
-#define CYCLES_DEF		1024
+#define CYCLES_DEF	1024
 #define FILECOUNT_DEF	4 * 1024
 #define FILESIZE_DEF	32 * 1024
 #define FNAME		"file_%d"
-#define TEMPDIR_DEF		"temp_syscallmeter"
+#define TEMPDIR_DEF	"temp_syscallmeter"
+#define MODE_DEF        "open"
 
 typedef struct {
 	sem_t fork_completed;
@@ -41,20 +42,23 @@ static int cycles = CYCLES_DEF;
 static int file_count = FILECOUNT_DEF;
 static int file_size = FILESIZE_DEF;
 static char* temp_dir = TEMPDIR_DEF;
+static char* mode = MODE_DEF;
 
 #define CPULIMIT	cpu_limit
 #define CYCLES		cycles
 #define FILECOUNT	file_count
 #define FILESIZE	file_size
 #define TEMPDIR		temp_dir
+#define MODE            mode
 
 
 static char* alloc_rndbytes(size_t size);
 static int init_directory(void);
 static int make_files(int dirfd);
-static int worker_job(int workerid, int dirfd);
+static int worker_job_open(int workerid, int dirfd);
 static int worker_job_rename(int workerid, int ncpu, int dirfd);
 static int parse_opts(int argc, char** argv);
+static int worker_job_write_and_unlink(int workerid, int dirfd);
 
 int
 main(int argc,char **argv)
@@ -119,7 +123,18 @@ main(int argc,char **argv)
 			sem_post(&semaphores->fork_completed);
 			sem_wait(&semaphores->starting);
 			clock_gettime(CLOCK_MONOTONIC, &ts_start);
-			worker_job_rename(i, ncpu, dirfd);
+
+            if (strcmp(MODE, "open") == 0)
+                worker_job_open(i, dirfd);
+            else if (strcmp(MODE, "rename") == 0)
+                worker_job_rename(i, ncpu, dirfd);
+            else if (strcmp(MODE, "write_unlink") == 0)
+                worker_job_write_and_unlink(i, dirfd);
+            else
+            {
+                printf("[%ld] Invalid job name %s, use -h to see valid job names.\n", i, MODE);
+                return -1;
+            }
 			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
 			ts_end.tv_sec = ts_end.tv_sec - ts_start.tv_sec;
@@ -160,7 +175,7 @@ static int
 parse_opts(int argc, char** argv)
 {
     int opt;
-    while ((opt = getopt(argc, argv, "j:c:f:s:d:h")) != -1)
+    while ((opt = getopt(argc, argv, "j:c:f:s:d:m:h")) != -1)
     {
         switch (opt)
         {
@@ -200,6 +215,9 @@ parse_opts(int argc, char** argv)
         case 'd':
             temp_dir = optarg;
             break;
+        case 'm':
+            mode = optarg;
+            break;
         case 'h':
             printf("Usage:\n"
                 " -c number of cycles, default %d\n"
@@ -207,8 +225,9 @@ parse_opts(int argc, char** argv)
                 " -f number of files to create, default %d\n"
                 " -s number of bytes in each file, default %d\n"
                 " -d dirrectory path, default %s\n"
+                " -m defines worker job, valid jobs: open, rename, write_unlink. Default %s\n"
                 " -h no arg, use to dispay this message\n",
-                cycles, cpu_limit, file_count, file_size, temp_dir);
+                CYCLES_DEF, CPULIMIT_DEF, FILECOUNT_DEF, FILESIZE_DEF, MODE_DEF, TEMPDIR_DEF);
             return -1;
         default:
             printf("unexpected option %c", opt);
@@ -262,7 +281,7 @@ make_files(int dirfd)
 }
 
 static int
-worker_job(int workerid,int dirfd)
+worker_job_open(int workerid,int dirfd)
 {
 	char filename[128];
 	int fd;
@@ -325,6 +344,39 @@ worker_job_rename(int workerid, int ncpu, int dirfd)
         }
     }
     return 0;
+}
+
+
+static int
+worker_job_write_and_unlink(int workerid, int dirfd)
+{
+    char filename[128];
+    int fd;
+    ssize_t write_res;
+    char* data = alloc_rndbytes(FILESIZE);
+    sprintf(filename, FNAME, workerid);
+    for(int i = 0; i < CYCLES; i++) {
+		fd = openat(dirfd, filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0)
+        {
+            printf("[%d] Can't create or open file %s: %s\n", workerid, filename, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        write_res = write(fd, data, FILESIZE);
+        if (write_res != FILESIZE)
+        {
+            printf("[%d] Can't write file %s: %s\n", workerid, filename, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        if (unlinkat(dirfd, filename, 0) < 0)
+        {
+            printf("[%d] Can't unlick file %s: %s\n",workerid, filename, strerror(errno));
+        }
+	}
+    free(data);
 }
 
 
