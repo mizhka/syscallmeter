@@ -16,28 +16,45 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
-#define CPULIMIT	128
-#define CYCLES		1024
-#define FILECOUNT	4 * 1024
-#define FILESIZE	32 * 1024
+#define CPULIMIT_DEF	128
+#define CYCLES_DEF		1024
+#define FILECOUNT_DEF	4 * 1024
+#define FILESIZE_DEF	32 * 1024
 #define FNAME		"file_%d"
-#define TEMPDIR		"temp_syscallmeter"
+#define TEMPDIR_DEF		"temp_syscallmeter"
 
 typedef struct {
 	sem_t fork_completed;
 	sem_t starting;
 } shmem_sem;
 
+
+static int cpu_limit = CPULIMIT_DEF;
+static int cycles = CYCLES_DEF;
+static int file_count = FILECOUNT_DEF;
+static int file_size = FILESIZE_DEF;
+static char* temp_dir = TEMPDIR_DEF;
+
+#define CPULIMIT	cpu_limit
+#define CYCLES		cycles
+#define FILECOUNT	file_count
+#define FILESIZE	file_size
+#define TEMPDIR		temp_dir
+
+
 static char* alloc_rndbytes(size_t size);
 static int init_directory(void);
 static int make_files(int dirfd);
 static int worker_job(int workerid, int dirfd);
+static int worker_job_rename(int workerid, int ncpu, int dirfd);
+static int parse_opts(int argc, char** argv);
 
 int
 main(int argc,char **argv)
@@ -46,6 +63,9 @@ main(int argc,char **argv)
 	long ncpu;
 	pid_t child;
 	shmem_sem *semaphores;
+
+    if (parse_opts(argc, argv) != 0)
+        return -1;
 
 	semaphores = mmap(0, sizeof(shmem_sem), PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1,0);
 
@@ -99,7 +119,7 @@ main(int argc,char **argv)
 			sem_post(&semaphores->fork_completed);
 			sem_wait(&semaphores->starting);
 			clock_gettime(CLOCK_MONOTONIC, &ts_start);
-			worker_job(i, dirfd);
+			worker_job_rename(i, ncpu, dirfd);
 			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
 			ts_end.tv_sec = ts_end.tv_sec - ts_start.tv_sec;
@@ -134,6 +154,70 @@ main(int argc,char **argv)
 	printf("Done\n");
 	return 0;
 }
+
+
+static int
+parse_opts(int argc, char** argv)
+{
+    int opt;
+    while ((opt = getopt(argc, argv, "j:c:f:s:d:h")) != -1)
+    {
+        switch (opt)
+        {
+        case 'j':
+            cpu_limit = strtol(optarg, NULL, 10);
+            if (errno == EINVAL || errno == ERANGE || cpu_limit <= 0)
+            {
+                printf("invalid arg %s for option -j expected integer grater than 0\n", optarg);
+                return -1;
+            }
+            break;
+
+        case 'c':
+            cycles = strtol(optarg, NULL, 10);
+            if (errno == EINVAL || errno == ERANGE || cycles <= 0)
+            {
+                printf("invalid arg %s for option -c expected integer grater than 0\n", optarg);
+                return -1;
+            }
+            break;
+        case 'f':
+            file_count = strtol(optarg, NULL, 10);
+            if (errno == EINVAL || errno == ERANGE || file_count <= 0)
+            {
+                printf("invalid arg %s for option -f expected integer grater than 0\n", optarg);
+                return -1;
+            }
+            break;
+        case 's':
+            file_size = strtol(optarg, NULL, 10);
+            if (errno == EINVAL || errno == ERANGE || file_size <= 0)
+            {
+                printf("invalid arg %s for option -s expected integer grater than 0\n", optarg);
+                return -1;
+            }
+            break;
+        case 'd':
+            temp_dir = optarg;
+            break;
+        case 'h':
+            printf("Usage:\n"
+                " -c number of cycles, default %d\n"
+                " -j number of max number of cpu, default %d\n"
+                " -f number of files to create, default %d\n"
+                " -s number of bytes in each file, default %d\n"
+                " -d dirrectory path, default %s\n"
+                " -h no arg, use to dispay this message\n",
+                cycles, cpu_limit, file_count, file_size, temp_dir);
+            return -1;
+        default:
+            printf("unexpected option %c", opt);
+            break;
+        }
+    }
+    return 0;
+}
+
 
 static int
 make_files(int dirfd)
@@ -198,6 +282,52 @@ worker_job(int workerid,int dirfd)
 	return 0;
 }
 
+
+static int
+worker_job_rename(int workerid, int ncpu, int dirfd)
+{
+    int renameRes;
+    char filename[128];
+    char newfilename[128];
+
+    int file_id_start = (FILECOUNT / ncpu) * workerid;
+    int file_id_end = (FILECOUNT / ncpu) * (workerid + 1);
+
+    if (fchdir(dirfd))
+    {
+        printf("[%d] Can't change dir: %s\n", workerid, strerror(errno));
+        return -1;
+    }
+    for (int i = 0; i < CYCLES; i++)
+    {
+        for (int file_id = file_id_start; file_id < file_id_end; file_id++)
+        {
+            sprintf(filename, FNAME, file_id);
+            sprintf(newfilename, FNAME, file_id + FILECOUNT);
+            renameRes = rename(filename, newfilename);
+            if (renameRes)
+            {
+                printf("[%d] Can't rename file %s to %s: %s", workerid, filename, newfilename, strerror(errno));
+                return -1;
+            }
+        }
+
+        for (int file_id = file_id_start + FILECOUNT; file_id < file_id_end + FILECOUNT; file_id++)
+        {
+            sprintf(filename, FNAME, file_id);
+            sprintf(newfilename, FNAME, file_id - FILECOUNT);
+            renameRes = rename(filename, newfilename);
+            if (renameRes)
+            {
+                printf("[%d] Can't rename file %s to %s: %s", workerid, filename, newfilename, strerror(errno));
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+
 static int
 init_directory(void)
 {
@@ -218,7 +348,7 @@ init_directory(void)
 		}
 
 		if (!S_ISDIR(st.st_mode)) {
-			printf("Error: Found non-directory with name " TEMPDIR "\n");
+			printf("Error: Found non-directory with name %s\n", temp_dir);
 			return -1;
 		}
 		printf("Warning! Found old directory\n");
