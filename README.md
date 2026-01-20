@@ -1,11 +1,30 @@
 ### Compile & Run
 
 ```
-cc -g -Wall -o s main.c && ./s
+mkdir build
+cd build
+cmake ..
+make clean all
 ```
 
-Linux:
+### Examples
+
+1. Measure "open" syscall (around 1 min)
 
 ```
-gcc -g -O0 -pthread -o s main.c  && ./s
+./syscallmeter 
 ```
+
+2. Measure "rename" syscall (around 5-10 mins)
+
+```
+./syscallmeter -m rename
+```
+
+3. Measure "write_unlink" syscall (around few seconds)
+
+```
+./syscallmeter -m write_unlink
+```
+
+4. Measure "write_sync" syscall
