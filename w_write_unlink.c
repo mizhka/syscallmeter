@@ -19,12 +19,14 @@ w_write_unlink_init(int dirfd)
 	return (0);
 }
 
-int
+long
 w_write_unlink_job(int workerid, int ncpu, int dirfd)
 {
 	char filename[128];
 	int fd;
 	ssize_t write_res;
+	long iter = 0;
+
 	char *data = alloc_rndbytes(FILESIZE);
 	sprintf(filename, FNAME, workerid);
 	for (int i = 0; i < CYCLES; i++) {
@@ -47,8 +49,9 @@ w_write_unlink_job(int workerid, int ncpu, int dirfd)
 			printf("[%d] Can't unlick file %s: %s\n", workerid,
 			    filename, strerror(errno));
 		}
+		iter++;
 	}
 	free(data);
 
-	return (0);
+	return (iter);
 }

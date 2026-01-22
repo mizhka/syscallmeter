@@ -20,8 +20,12 @@ extern char *mode;
 #define MODE	  mode
 
 typedef int (*worker_init_t)(int);
-/* args: workerid, ncpu, dirfd */
-typedef int (*worker_job_t)(int, int, int);
+/*
+ * args: workerid, ncpu, dirfd
+ * returns: positive - amount of iterations
+ *          negative - error
+ */
+typedef long (*worker_job_t)(int, int, int);
 
 typedef struct {
 	worker_init_t init;

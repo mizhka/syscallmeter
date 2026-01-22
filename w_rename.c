@@ -15,12 +15,13 @@ w_rename_init(int dirfd)
 	return (0);
 }
 
-int
+long
 w_rename_job(int workerid, int ncpu, int dirfd)
 {
 	int renameRes;
 	char filename[128];
 	char newfilename[128];
+	long iter = 0;
 
 	int file_id_start = (FILECOUNT / ncpu) * workerid;
 	int file_id_end = (FILECOUNT / ncpu) * (workerid + 1);
@@ -43,6 +44,7 @@ w_rename_job(int workerid, int ncpu, int dirfd)
 				    strerror(errno));
 				return (-1);
 			}
+			iter++;
 		}
 
 		for (int file_id = file_id_start + FILECOUNT;
@@ -56,7 +58,8 @@ w_rename_job(int workerid, int ncpu, int dirfd)
 				    strerror(errno));
 				return (-1);
 			}
+			iter++;
 		}
 	}
-	return (0);
+	return (iter);
 }

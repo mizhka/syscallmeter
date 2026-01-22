@@ -2,6 +2,6 @@
 #define _W_WRITE_UNLINK_H_
 
 int w_write_unlink_init(int);
-int w_write_unlink_job(int, int, int);
+long w_write_unlink_job(int, int, int);
 
 #endif /* !_W_WRITE_UNLINK_H_ */

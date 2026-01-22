@@ -28,3 +28,9 @@ make clean all
 ```
 
 4. Measure "write_sync" syscall
+
+```
+./syscallmeter -m write_sync_joinedlock -s 16777216 -f 256
+./syscallmeter -m write_sync_duallock -s 16777216 -f 256
+./syscallmeter -m write_sync_onlywritelock -s 16777216 -f 256
+```

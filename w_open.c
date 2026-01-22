@@ -16,11 +16,12 @@ w_open_init(int dirfd)
 	return (0);
 };
 
-int
+long
 w_open_job(int workerid, int ncpu, int dirfd)
 {
 	char filename[128];
 	int fd;
+	long iter = 0;
 
 	for (int i = 0; i < CYCLES; i++) {
 		for (int k = 0; k < FILECOUNT; k++) {
@@ -32,7 +33,8 @@ w_open_job(int workerid, int ncpu, int dirfd)
 				return -1;
 			}
 			close(fd);
+			iter++;
 		}
 	}
-	return (0);
+	return (iter);
 }

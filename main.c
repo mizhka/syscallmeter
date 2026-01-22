@@ -5,6 +5,7 @@
  *      Author: mizhka
  */
 
+#include "w_write_sync.h"
 #define _GNU_SOURCE
 
 #include <sys/param.h>
@@ -26,6 +27,7 @@
 #include "syscallmeter.h"
 #include "w_open.h"
 #include "w_rename.h"
+#include "w_write_sync.h"
 #include "w_write_unlink.h"
 
 #define CPULIMIT_DEF  128
@@ -46,6 +48,7 @@ int file_count = FILECOUNT_DEF;
 int file_size = FILESIZE_DEF;
 char *temp_dir = TEMPDIR_DEF;
 char *mode = MODE_DEF;
+long ncpu;
 
 static int init_directory(void);
 static int parse_opts(int argc, char **argv);
@@ -54,7 +57,7 @@ int
 main(int argc, char **argv)
 {
 	int dirfd, err;
-	long ncpu;
+
 	pid_t child;
 	shmem_sem *semaphores;
 	worker_func func;
@@ -72,10 +75,6 @@ main(int argc, char **argv)
 
 	sem_init(&semaphores->fork_completed, 1, 0);
 	sem_init(&semaphores->starting, 1, 0);
-
-	ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-	printf("Found %ld cores\n", ncpu);
-	ncpu = MIN(ncpu, CPULIMIT);
 
 	err = init_directory();
 	if (err)
@@ -97,6 +96,15 @@ main(int argc, char **argv)
 	} else if (strcmp(MODE, "write_unlink") == 0) {
 		func.init = &w_write_unlink_init;
 		func.job = &w_write_unlink_job;
+	} else if (strcmp(MODE, "write_sync_joinedlock") == 0) {
+		func.init = &w_write_sync_joinedlock_init;
+		func.job = &w_write_sync_job;
+	} else if (strcmp(MODE, "write_sync_duallock") == 0) {
+		func.init = &w_write_sync_duallock_init;
+		func.job = &w_write_sync_job;
+	} else if (strcmp(MODE, "write_sync_onlywritelock") == 0) {
+		func.init = &w_write_sync_onlywritelock_init;
+		func.job = &w_write_sync_job;
 	} else {
 		printf("Unknown worker job (-m): %s,"
 		       " use -h to see valid job names\n",
@@ -111,6 +119,8 @@ main(int argc, char **argv)
 		if (child == 0) {
 			cpu_set_t mask;
 			double speed;
+			long iter;
+
 			struct timespec ts_start, ts_end;
 
 			child = getpid();
@@ -127,7 +137,7 @@ main(int argc, char **argv)
 			sem_wait(&semaphores->starting);
 			clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
-			func.job(i, ncpu, dirfd);
+			iter = func.job(i, ncpu, dirfd);
 
 			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
@@ -141,12 +151,12 @@ main(int argc, char **argv)
 			speed = (double)((long long)ts_end.tv_sec * 1000 *
 					1000 * 1000 +
 				    ts_end.tv_nsec) /
-			    (double)((long)FILECOUNT * (long)CYCLES);
+			    (double)(iter);
 
 			printf(
-			    "[%d] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
-			    child, (long)FILECOUNT * (long)CYCLES,
-			    (long long)ts_end.tv_sec, ts_end.tv_nsec, speed);
+			    "[%d / %ld] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
+			    child, i, iter, (long long)ts_end.tv_sec,
+			    ts_end.tv_nsec, speed);
 			return 0;
 		}
 	}
@@ -238,6 +248,17 @@ parse_opts(int argc, char **argv)
 			break;
 		}
 	}
+
+	ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+	printf("Found %ld cores\n", ncpu);
+	ncpu = MIN(ncpu, CPULIMIT);
+
+	printf("Settings:\n");
+	printf("\tCYCLES = %d\n", cycles);
+	printf("\tWORKERS = %ld\n", ncpu);
+	printf("\tFILECOUNT = %d\n", file_count);
+	printf("\tFILESIZE = %d\n", file_size);
+
 	return 0;
 }
 
@@ -314,6 +335,8 @@ char *
 alloc_rndbytes(size_t size)
 {
 	char *ret;
+	unsigned int g_seed;
+	g_seed = random();
 
 	ret = malloc(size);
 	if (ret == NULL) {
@@ -321,7 +344,8 @@ alloc_rndbytes(size_t size)
 	}
 
 	for (int i = 0; i < size; i++) {
-		ret[i] = 'A' + (char)(random() % 0x1a);
+		g_seed = (214013 * g_seed + 2531011);
+		ret[i] = 'A' + (char)(((g_seed >> 16) & 0x7FFF) % 0x1a);
 	}
 
 	return ret;
