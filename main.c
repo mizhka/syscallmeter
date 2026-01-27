@@ -105,6 +105,9 @@ main(int argc, char **argv)
 	} else if (strcmp(MODE, "write_sync_onlywritelock") == 0) {
 		func.init = &w_write_sync_onlywritelock_init;
 		func.job = &w_write_sync_job;
+	} else if (strcmp(MODE, "write_sync_sharesynclock") == 0) {
+		func.init = &w_write_sync_sharesynclock_init;
+		func.job = &w_write_sync_job;
 	} else {
 		printf("Unknown worker job (-m): %s,"
 		       " use -h to see valid job names\n",

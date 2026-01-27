@@ -1,13 +1,12 @@
 #include <sys/param.h>
 #include <sys/mman.h>
 
-// #include <errno.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
-// #include <string.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "syscallmeter.h"
@@ -15,7 +14,13 @@
 
 #define CHUNKSIZE 64 * 1024
 
-enum w_lockmode { JOINED, DUAL, ONLYWRITE };
+/*
+ * Joined - single hold of lock for write and sync
+ * Dual - separate locks for write and sync
+ * OnlyWrite - lock for write and no lock for sync
+ * ExWr_ShSy - exclusive lock for write and shared lock for sync
+ */
+enum w_lockmode { JOINED, DUAL, ONLYWRITE, EXWR_SHSY };
 
 #define DO_LOCK(_p)                                                                \
 	do {                                                                       \
@@ -73,11 +78,13 @@ struct workers_sem *w_state;
 static int
 w_write_sync_init_common(int dirfd, enum w_lockmode w_mode)
 {
+	int sync_concurrency = (w_mode == EXWR_SHSY) ? 8 : 1;
+
 	w_state = mmap(0, sizeof(struct workers_sem), PROT_READ | PROT_WRITE,
 	    MAP_ANON | MAP_SHARED, -1, 0);
 
 	sem_init(&w_state->mx_write, 1, 1);
-	sem_init(&w_state->mx_sync, 1, 1);
+	sem_init(&w_state->mx_sync, 1, sync_concurrency);
 
 	w_state->position = 0;
 	w_state->file_index = 0;
@@ -107,6 +114,12 @@ w_write_sync_onlywritelock_init(int dirfd)
 	return (w_write_sync_init_common(dirfd, ONLYWRITE));
 }
 
+int
+w_write_sync_sharesynclock_init(int dirfd)
+{
+	return (w_write_sync_init_common(dirfd, EXWR_SHSY));
+}
+
 long
 w_write_sync_job(int workerid, int ncpu, int dirfd)
 {
@@ -120,10 +133,11 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 
 	char *data = alloc_rndbytes(FILESIZE);
 	sprintf(filename, FNAME, curr_index);
-	fd = openat(dirfd, filename, O_CREAT | O_RDWR, 0644);
+	fd = openat(dirfd, filename, O_CREAT | O_RDWR | O_DIRECT, 0644);
 
 	for (int i = 0; i < CYCLES; i++) {
 		DO_WORK(20);
+
 		DO_LOCK(&w_state->mx_write);
 
 		if (curr_index < w_state->file_index) {
@@ -135,17 +149,20 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 			// TODO: err check
 		}
 
-		pwrite(fd, &data[w_state->position], CHUNKSIZE,
+		pwrite(fd, &data[w_state->position],
+		    MIN(CHUNKSIZE, file_size - w_state->position),
 		    w_state->position);
 		// TODO: err check
-		w_state->position += CHUNKSIZE;
+
+		w_state->position += CHUNKSIZE - 8 * 1024;
 		if (w_state->position >= file_size) {
 			w_state->file_index++;
-			w_state->position %= file_size;
+			w_state->position = 0;
 		}
 
 		switch (w_state->w_mode) {
 		case DUAL:
+		case EXWR_SHSY:
 			DO_LOCK(&w_state->mx_sync);
 			DO_UNLOCK(&w_state->mx_write);
 			break;
@@ -156,7 +173,13 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 			break;
 		}
 
-		fdatasync(fd);
+		err = fdatasync(fd);
+		if (err != 0) {
+			printf("fdatasync failed with error %s\n",
+			    strerror(errno));
+			exit(1);
+		}
+
 		iter++;
 
 		switch (w_state->w_mode) {
@@ -164,6 +187,7 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 			DO_UNLOCK(&w_state->mx_write);
 			break;
 		case DUAL:
+		case EXWR_SHSY:
 			DO_UNLOCK(&w_state->mx_sync);
 			break;
 		default:
