@@ -8,23 +8,22 @@
 #define FNAME "file_%d"
 
 int
-w_open_init(int dirfd)
+w_open_init(struct meter_settings *s, int dirfd)
 {
-	if (make_files(dirfd))
+	if (make_files(s, dirfd))
 		return (-1);
 	printf("Created files successfully\n");
 	return (0);
 };
 
 long
-w_open_job(int workerid, int ncpu, int dirfd)
+w_open_job(int workerid, struct meter_worker_state *s, int dirfd)
 {
 	char filename[128];
 	int fd;
-	long iter = 0;
 
-	for (int i = 0; i < CYCLES; i++) {
-		for (int k = 0; k < FILECOUNT; k++) {
+	for (int i = 0; i < s->settings->cycles; i++) {
+		for (int k = 0; k < s->settings->file_count; k++) {
 			sprintf(filename, FNAME, k);
 			fd = openat(dirfd, filename, O_RDWR);
 			if (fd < 0) {
@@ -33,8 +32,8 @@ w_open_job(int workerid, int ncpu, int dirfd)
 				return -1;
 			}
 			close(fd);
-			iter++;
+			s->my_stats->cycles++;
 		}
 	}
-	return (iter);
+	return (s->my_stats->cycles);
 }

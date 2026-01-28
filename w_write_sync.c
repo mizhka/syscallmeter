@@ -63,79 +63,92 @@ enum w_lockmode { JOINED, DUAL, ONLYWRITE, EXWR_SHSY };
 		} while ((end - start) < wait_cycles);          \
 	} while (1 == 0);
 
-typedef struct workers_sem {
+typedef struct workers_sharedmem {
 	sem_t mx_write;
 	sem_t mx_sync;
 	long position;
 	int file_index;
+} workers_sharedmem_t;
+
+/* Global variables - constant over time */
+typedef struct workers_test_params {
 	enum w_lockmode w_mode;
-} workers_sem_t;
+	int sync_concurrency;
+	int direct;
+	int shift_position;
+} workers_test_params_t;
 
-struct workers_sem *w_state;
+struct workers_sharedmem *w_state = NULL;
+struct workers_test_params w_params = { .sync_concurrency = 1,
+	.w_mode = JOINED,
+	.direct = 0,
+	.shift_position = 0 };
 
-#include <x86intrin.h>
-
-static int
-w_write_sync_init_common(int dirfd, enum w_lockmode w_mode)
+int
+w_write_sync_option(char *option)
 {
-	int sync_concurrency = (w_mode == EXWR_SHSY) ? 8 : 1;
-
-	w_state = mmap(0, sizeof(struct workers_sem), PROT_READ | PROT_WRITE,
-	    MAP_ANON | MAP_SHARED, -1, 0);
-
-	sem_init(&w_state->mx_write, 1, 1);
-	sem_init(&w_state->mx_sync, 1, sync_concurrency);
-
-	w_state->position = 0;
-	w_state->file_index = 0;
-	w_state->w_mode = w_mode;
-
-	if (make_files(dirfd))
-		return (-1);
-	printf("Created files successfully\n");
+	if (strcmp(option, "joined") == 0) {
+		w_params.w_mode = JOINED;
+	} else if (strcmp(option, "dual") == 0) {
+		w_params.w_mode = DUAL;
+	} else if (strcmp(option, "onlywrite") == 0) {
+		w_params.w_mode = ONLYWRITE;
+	} else if (strcmp(option, "sharesync8") == 0) {
+		w_params.w_mode = EXWR_SHSY;
+		w_params.sync_concurrency = 8;
+	} else if (strcmp(option, "sharesync16") == 0) {
+		w_params.w_mode = EXWR_SHSY;
+		w_params.sync_concurrency = 16;
+	} else if (strcmp(option, "direct") == 0) {
+		w_params.direct = 1;
+	} else if (strcmp(option, "doublelast") == 0) {
+		w_params.shift_position = 8 * 1024;
+	} else {
+		printf("unexpected option: %s\n", option);
+		return -1;
+	}
 	return (0);
 }
 
 int
-w_write_sync_joinedlock_init(int dirfd)
+w_write_sync_init(struct meter_settings *s, int dirfd)
 {
-	return (w_write_sync_init_common(dirfd, JOINED));
-}
+	w_state = mmap(0, sizeof(struct workers_sharedmem),
+	    PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
 
-int
-w_write_sync_duallock_init(int dirfd)
-{
-	return (w_write_sync_init_common(dirfd, DUAL));
-}
+	if (w_state == MAP_FAILED) {
+		return (-1);
+	}
 
-int
-w_write_sync_onlywritelock_init(int dirfd)
-{
-	return (w_write_sync_init_common(dirfd, ONLYWRITE));
-}
+	w_state->position = 0;
+	w_state->file_index = 0;
 
-int
-w_write_sync_sharesynclock_init(int dirfd)
-{
-	return (w_write_sync_init_common(dirfd, EXWR_SHSY));
+	sem_init(&w_state->mx_write, 1, 1);
+	sem_init(&w_state->mx_sync, 1, w_params.sync_concurrency);
+
+	if (make_files(s, dirfd))
+		return (-1);
+	printf("Created files successfully\n");
+
+	return (0);
 }
 
 long
-w_write_sync_job(int workerid, int ncpu, int dirfd)
+w_write_sync_job(int workerid, struct meter_worker_state *s, int dirfd)
 {
 	char filename[128];
-	int fd, err, curr_index;
+	int fd, err, curr_index, flags;
 	ssize_t write_res;
-	long iter;
 
-	iter = 0;
 	curr_index = w_state->file_index;
 
-	char *data = alloc_rndbytes(FILESIZE);
+	char *data = alloc_rndbytes(s->settings->file_size);
 	sprintf(filename, FNAME, curr_index);
-	fd = openat(dirfd, filename, O_CREAT | O_RDWR | O_DIRECT, 0644);
 
-	for (int i = 0; i < CYCLES; i++) {
+	flags = O_CREAT | O_RDWR | (((w_params.direct != 0) ? O_DIRECT : 0));
+	fd = openat(dirfd, filename, flags, 0644);
+
+	for (int i = 0; i < s->settings->cycles; i++) {
 		DO_WORK(20);
 
 		DO_LOCK(&w_state->mx_write);
@@ -145,22 +158,22 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 			// TODO: err check
 			curr_index = w_state->file_index;
 			sprintf(filename, FNAME, curr_index);
-			fd = openat(dirfd, filename, O_CREAT | O_RDWR, 0644);
+			fd = openat(dirfd, filename, flags, 0644);
 			// TODO: err check
 		}
 
 		pwrite(fd, &data[w_state->position],
-		    MIN(CHUNKSIZE, file_size - w_state->position),
+		    MIN(CHUNKSIZE, s->settings->file_size - w_state->position),
 		    w_state->position);
 		// TODO: err check
 
-		w_state->position += CHUNKSIZE - 8 * 1024;
-		if (w_state->position >= file_size) {
+		w_state->position += CHUNKSIZE - w_params.shift_position;
+		if (w_state->position >= s->settings->file_size) {
 			w_state->file_index++;
 			w_state->position = 0;
 		}
 
-		switch (w_state->w_mode) {
+		switch (w_params.w_mode) {
 		case DUAL:
 		case EXWR_SHSY:
 			DO_LOCK(&w_state->mx_sync);
@@ -180,9 +193,9 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 			exit(1);
 		}
 
-		iter++;
+		s->my_stats->cycles++;
 
-		switch (w_state->w_mode) {
+		switch (w_params.w_mode) {
 		case JOINED:
 			DO_UNLOCK(&w_state->mx_write);
 			break;
@@ -198,5 +211,5 @@ w_write_sync_job(int workerid, int ncpu, int dirfd)
 	free(data);
 	close(fd);
 
-	return (iter);
+	return (s->my_stats->cycles);
 }

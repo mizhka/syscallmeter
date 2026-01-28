@@ -11,25 +11,24 @@
 #include "w_write_unlink.h"
 
 int
-w_write_unlink_init(int dirfd)
+w_write_unlink_init(struct meter_settings *s, int dirfd)
 {
-	if (make_files(dirfd))
+	if (make_files(s, dirfd))
 		return (-1);
 	printf("Created files successfully\n");
 	return (0);
 }
 
 long
-w_write_unlink_job(int workerid, int ncpu, int dirfd)
+w_write_unlink_job(int workerid, struct meter_worker_state *s, int dirfd)
 {
 	char filename[128];
 	int fd;
 	ssize_t write_res;
-	long iter = 0;
 
-	char *data = alloc_rndbytes(FILESIZE);
+	char *data = alloc_rndbytes(s->settings->file_size);
 	sprintf(filename, FNAME, workerid);
-	for (int i = 0; i < CYCLES; i++) {
+	for (int i = 0; i < s->settings->cycles; i++) {
 		fd = openat(dirfd, filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
 		if (fd < 0) {
 			printf("[%d] Can't create or open file %s: %s\n",
@@ -37,8 +36,8 @@ w_write_unlink_job(int workerid, int ncpu, int dirfd)
 			close(fd);
 			return (-1);
 		}
-		write_res = write(fd, data, FILESIZE);
-		if (write_res != FILESIZE) {
+		write_res = write(fd, data, s->settings->file_size);
+		if (write_res != s->settings->file_size) {
 			printf("[%d] Can't write file %s: %s\n", workerid,
 			    filename, strerror(errno));
 			close(fd);
@@ -49,9 +48,9 @@ w_write_unlink_job(int workerid, int ncpu, int dirfd)
 			printf("[%d] Can't unlick file %s: %s\n", workerid,
 			    filename, strerror(errno));
 		}
-		iter++;
+		s->my_stats->cycles++;
 	}
 	free(data);
 
-	return (iter);
+	return (s->my_stats->cycles);
 }

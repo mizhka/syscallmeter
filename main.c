@@ -5,12 +5,12 @@
  *      Author: mizhka
  */
 
-#include "w_write_sync.h"
 #define _GNU_SOURCE
 
 #include <sys/param.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 #include <dirent.h>
@@ -24,12 +24,16 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "progress.h"
 #include "syscallmeter.h"
 #include "w_open.h"
 #include "w_rename.h"
 #include "w_write_sync.h"
 #include "w_write_unlink.h"
 
+/**
+ * Default settings
+ */
 #define CPULIMIT_DEF  128
 #define CYCLES_DEF    1024
 #define FILECOUNT_DEF 4 * 1024
@@ -37,95 +41,80 @@
 #define TEMPDIR_DEF   "temp_syscallmeter"
 #define MODE_DEF      "open"
 
-typedef struct {
-	sem_t fork_completed;
-	sem_t starting;
-} shmem_sem;
+const struct meter_settings default_settings = { .cpu_limit = CPULIMIT_DEF,
+	.cycles = CYCLES_DEF,
+	.file_count = FILECOUNT_DEF,
+	.file_size = FILESIZE_DEF,
+	.temp_dir = TEMPDIR_DEF,
+	.mode = MODE_DEF,
+	.options = NULL,
+	.ncpu = 0,
+	.progress = 0 };
 
-int cpu_limit = CPULIMIT_DEF;
-int cycles = CYCLES_DEF;
-int file_count = FILECOUNT_DEF;
-int file_size = FILESIZE_DEF;
-char *temp_dir = TEMPDIR_DEF;
-char *mode = MODE_DEF;
-long ncpu;
-
-static int init_directory(void);
-static int parse_opts(int argc, char **argv);
+/* Context functions */
+static struct meter_ctx *new_context();
+static int init_directory(struct meter_ctx *mctx);
+static int parse_opts(struct meter_ctx *mctx, int argc, char **argv);
+static int lookup_test_callbacks(char *mode, worker_func *func);
 
 int
 main(int argc, char **argv)
 {
+	struct meter_ctx *ctx;
 	int dirfd, err;
 
 	pid_t child;
-	shmem_sem *semaphores;
 	worker_func func;
 
-	if (parse_opts(argc, argv) != 0)
-		return -1;
+	const char delim[] = ",";
+	char *saveptr, *option;
 
-	semaphores = mmap(0, sizeof(shmem_sem), PROT_READ | PROT_WRITE,
-	    MAP_ANON | MAP_SHARED, -1, 0);
+	ctx = new_context();
+	if (ctx == NULL)
+		return (-1);
 
-	if (semaphores == MAP_FAILED) {
-		printf("Can't mmap area: %s\n", strerror(errno));
-		return -1;
-	}
+	if (parse_opts(ctx, argc, argv) != 0)
+		return (-1);
 
-	sem_init(&semaphores->fork_completed, 1, 0);
-	sem_init(&semaphores->starting, 1, 0);
-
-	err = init_directory();
+	err = init_directory(ctx);
 	if (err)
 		return -1;
 
-	dirfd = open(TEMPDIR, 0);
+	dirfd = open(ctx->settings->temp_dir, 0);
 	if (dirfd < 0) {
 		printf("Can\'t open directory\n");
 		return -1;
 	}
 	printf("Created directory successfully\n");
 
-	if (strcmp(MODE, "open") == 0) {
-		func.init = &w_open_init;
-		func.job = &w_open_job;
-	} else if (strcmp(MODE, "rename") == 0) {
-		func.init = &w_rename_init;
-		func.job = &w_rename_job;
-	} else if (strcmp(MODE, "write_unlink") == 0) {
-		func.init = &w_write_unlink_init;
-		func.job = &w_write_unlink_job;
-	} else if (strcmp(MODE, "write_sync_joinedlock") == 0) {
-		func.init = &w_write_sync_joinedlock_init;
-		func.job = &w_write_sync_job;
-	} else if (strcmp(MODE, "write_sync_duallock") == 0) {
-		func.init = &w_write_sync_duallock_init;
-		func.job = &w_write_sync_job;
-	} else if (strcmp(MODE, "write_sync_onlywritelock") == 0) {
-		func.init = &w_write_sync_onlywritelock_init;
-		func.job = &w_write_sync_job;
-	} else if (strcmp(MODE, "write_sync_sharesynclock") == 0) {
-		func.init = &w_write_sync_sharesynclock_init;
-		func.job = &w_write_sync_job;
-	} else {
-		printf("Unknown worker job (-m): %s,"
-		       " use -h to see valid job names\n",
-		    MODE);
-		return -1;
+	err = lookup_test_callbacks(ctx->settings->mode, &func);
+
+	// Parse options and push them
+	if (ctx->settings->options != NULL && func.opt != NULL) {
+		option = strtok_r(ctx->settings->options, delim, &saveptr);
+		while (option != NULL) {
+			err = func.opt(option);
+			if (err != 0) {
+				return (err);
+			}
+			option = strtok_r(NULL, delim, &saveptr);
+		}
 	}
 
-	err = func.init(dirfd);
+	// Initialize test
+	err = func.init(ctx->settings, dirfd);
 
-	for (long i = 0; i < ncpu; i++) {
+	for (long i = 0; i < ctx->settings->ncpu; i++) {
 		child = fork();
 		if (child == 0) {
 			cpu_set_t mask;
 			double speed;
 			long iter;
-
+			struct meter_worker_state mystate;
 			struct timespec ts_start, ts_end;
 
+			mystate.my_stats = &(ctx->stats[i]);
+			mystate.settings = ctx->settings;
 			child = getpid();
 
 			CPU_ZERO(&mask);
@@ -136,13 +125,13 @@ main(int argc, char **argv)
 				return -1;
 			}
 			printf("[%d] I\'m on CPU: %d\n", child, sched_getcpu());
-			sem_post(&semaphores->fork_completed);
-			sem_wait(&semaphores->starting);
-			clock_gettime(CLOCK_MONOTONIC, &ts_start);
+			sem_post(&(ctx->sems->fork_completed));
+			sem_wait(&(ctx->sems->starting));
+			clock_gettime(CLOCK_MONOTONIC_FAST, &ts_start);
 
-			iter = func.job(i, ncpu, dirfd);
+			iter = func.job(i, &mystate, dirfd);
 
-			clock_gettime(CLOCK_MONOTONIC, &ts_end);
+			clock_gettime(CLOCK_MONOTONIC_FAST, &ts_end);
 
 			ts_end.tv_sec = ts_end.tv_sec - ts_start.tv_sec;
 			ts_end.tv_nsec = ts_end.tv_nsec - ts_start.tv_nsec;
@@ -164,33 +153,51 @@ main(int argc, char **argv)
 		}
 	}
 
-	for (int i = 0; i < ncpu; i++) {
-		sem_wait(&semaphores->fork_completed);
+	// Hackish - TODO: cosmetic change is required
+	do {
+		cpu_set_t mask;
+		double speed;
+		long iter;
+
+		CPU_ZERO(&mask);
+		CPU_SET(ctx->settings->ncpu, &mask);
+		err = sched_setaffinity(0, sizeof(cpu_set_t), &mask);
+		if (err == -1) {
+			printf("[main] Can\'t set affinity\n");
+			return -1;
+		}
+	} while (1 == 0);
+
+	for (int i = 0; i < ctx->settings->ncpu; i++) {
+		sem_wait(&(ctx->sems->fork_completed));
 	}
 
+	if (ctx->settings->progress == 1)
+		enable_progress(ctx->stats, ctx->settings->ncpu);
+
 	printf("Starting...\n");
-	for (int i = 0; i < ncpu; i++) {
-		sem_post(&semaphores->starting);
+	for (int i = 0; i < ctx->settings->ncpu; i++) {
+		sem_post(&(ctx->sems->starting));
 	}
 
 	do {
 		child = wait(&child);
-	} while (child > 0);
+	} while (child > 0 || (child == -1 && errno == EINTR));
 
 	printf("Done\n");
 	return 0;
 }
 
 static int
-parse_opts(int argc, char **argv)
+parse_opts(struct meter_ctx *mctx, int argc, char **argv)
 {
 	int opt;
-	while ((opt = getopt(argc, argv, "j:c:f:s:d:m:h")) != -1) {
+	while ((opt = getopt(argc, argv, "j:c:f:s:d:m:o:hp")) != -1) {
 		switch (opt) {
 		case 'j':
-			cpu_limit = strtol(optarg, NULL, 10);
+			mctx->settings->cpu_limit = strtol(optarg, NULL, 10);
 			if (errno == EINVAL || errno == ERANGE ||
-			    cpu_limit <= 0) {
+			    mctx->settings->cpu_limit <= 0) {
 				printf(
 				    "invalid arg %s for option -j expected integer grater than 0\n",
 				    optarg);
@@ -199,8 +206,9 @@ parse_opts(int argc, char **argv)
 			break;
 
 		case 'c':
-			cycles = strtol(optarg, NULL, 10);
-			if (errno == EINVAL || errno == ERANGE || cycles <= 0) {
+			mctx->settings->cycles = strtol(optarg, NULL, 10);
+			if (errno == EINVAL || errno == ERANGE ||
+			    mctx->settings->cycles <= 0) {
 				printf(
 				    "invalid arg %s for option -c expected integer grater than 0\n",
 				    optarg);
@@ -208,9 +216,9 @@ parse_opts(int argc, char **argv)
 			}
 			break;
 		case 'f':
-			file_count = strtol(optarg, NULL, 10);
+			mctx->settings->file_count = strtol(optarg, NULL, 10);
 			if (errno == EINVAL || errno == ERANGE ||
-			    file_count <= 0) {
+			    mctx->settings->file_count <= 0) {
 				printf(
 				    "invalid arg %s for option -f expected integer grater than 0\n",
 				    optarg);
@@ -218,9 +226,9 @@ parse_opts(int argc, char **argv)
 			}
 			break;
 		case 's':
-			file_size = strtol(optarg, NULL, 10);
+			mctx->settings->file_size = strtol(optarg, NULL, 10);
 			if (errno == EINVAL || errno == ERANGE ||
-			    file_size <= 0) {
+			    mctx->settings->file_size <= 0) {
 				printf(
 				    "invalid arg %s for option -s expected integer grater than 0\n",
 				    optarg);
@@ -228,10 +236,16 @@ parse_opts(int argc, char **argv)
 			}
 			break;
 		case 'd':
-			temp_dir = optarg;
+			mctx->settings->temp_dir = optarg;
 			break;
 		case 'm':
-			mode = optarg;
+			mctx->settings->mode = optarg;
+			break;
+		case 'o':
+			mctx->settings->options = optarg;
+			break;
+		case 'p':
+			mctx->settings->progress = 1;
 			break;
 		case 'h':
 			printf(
@@ -247,51 +261,53 @@ parse_opts(int argc, char **argv)
 			    CPULIMIT_DEF, MODE_DEF, FILESIZE_DEF);
 			return -1;
 		default:
-			printf("unexpected option %c", opt);
-			break;
+			printf("unexpected argument %c", opt);
+			return -1;
 		}
 	}
 
-	ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-	printf("Found %ld cores\n", ncpu);
-	ncpu = MIN(ncpu, CPULIMIT);
+	mctx->settings->ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+	printf("Found %ld cores\n", mctx->settings->ncpu);
+	mctx->settings->ncpu = MIN(mctx->settings->ncpu - 1,
+	    mctx->settings->cpu_limit);
+	mctx->settings->ncpu = MIN(MAX_WORKERS, mctx->settings->ncpu);
 
 	printf("Settings:\n");
-	printf("\tCYCLES = %d\n", cycles);
-	printf("\tWORKERS = %ld\n", ncpu);
-	printf("\tFILECOUNT = %d\n", file_count);
-	printf("\tFILESIZE = %d\n", file_size);
+	printf("\tCYCLES = %d\n", mctx->settings->cycles);
+	printf("\tWORKERS = %ld\n", mctx->settings->ncpu);
+	printf("\tFILECOUNT = %d\n", mctx->settings->file_count);
+	printf("\tFILESIZE = %d\n", mctx->settings->file_size);
 
 	return 0;
 }
 
 int
-make_files(int dirfd)
+make_files(struct meter_settings *s, int dirfd)
 {
 	char *rndbytes;
 	char filename[128];
 	int fd;
 	size_t written;
 
-	rndbytes = alloc_rndbytes(FILESIZE);
+	rndbytes = alloc_rndbytes(s->file_size);
 	if (rndbytes == NULL) {
 		printf("Can\'t allocate random bytes");
 		return -1;
 	}
 
-	for (int k = 0; k < FILECOUNT; k++) {
+	for (int k = 0; k < s->file_count; k++) {
 		sprintf(filename, FNAME, k);
 		fd = openat(dirfd, filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
 		if (fd < 0) {
 			printf("Can't create or open file %s", filename);
 			return -1;
 		}
-		written = write(fd, rndbytes, FILESIZE);
+		written = write(fd, rndbytes, s->file_size);
 		if (written == -1) {
 			printf("Can't write file %s: %s\n", filename,
 			    strerror(errno));
 			return -1;
-		} else if (written != FILESIZE) {
+		} else if (written != s->file_size) {
 			printf("Can't fully write file %s: %zu\n", filename,
 			    written);
 			return -1;
@@ -305,19 +321,19 @@ make_files(int dirfd)
 }
 
 static int
-init_directory(void)
+init_directory(struct meter_ctx *mctx)
 {
 	int err;
 	struct stat st;
 
-	err = mkdir(TEMPDIR, 0775);
+	err = mkdir(mctx->settings->temp_dir, 0775);
 	if (err) {
 		if (errno != EEXIST) {
 			printf("Can't create directory: %s\n", strerror(errno));
 			return -1;
 		}
 
-		err = stat(TEMPDIR, &st);
+		err = stat(mctx->settings->temp_dir, &st);
 		if (err) {
 			printf("Error on stat(TEMPDIR): %s\n", strerror(errno));
 			return -1;
@@ -325,7 +341,7 @@ init_directory(void)
 
 		if (!S_ISDIR(st.st_mode)) {
 			printf("Error: Found non-directory with name %s\n",
-			    temp_dir);
+			    mctx->settings->temp_dir);
 			return -1;
 		}
 		printf("Warning! Found old directory\n");
@@ -352,4 +368,85 @@ alloc_rndbytes(size_t size)
 	}
 
 	return ret;
+}
+
+static struct meter_ctx *
+new_context()
+{
+	struct meter_ctx *ctx;
+	ctx = malloc(sizeof(struct meter_ctx));
+	if (ctx == NULL) {
+		perror("No memory to allocate context");
+		goto fail;
+	}
+
+	ctx->settings = malloc(sizeof(struct meter_settings));
+	if (ctx->settings == NULL) {
+		perror("No memory to allocate context");
+		goto free_ctx;
+	}
+
+	memcpy(ctx->settings, &default_settings, sizeof(struct meter_settings));
+
+	ctx->sems = mmap(0, sizeof(struct meter_semaphores),
+	    PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+
+	if (ctx->sems == MAP_FAILED) {
+		printf("Can't mmap area: %s\n", strerror(errno));
+		goto free_settings;
+	}
+
+	sem_init(&(ctx->sems->fork_completed), 1, 0);
+	sem_init(&(ctx->sems->starting), 1, 0);
+
+	ctx->stats = mmap(0, sizeof(struct meter_stats) * MAX_WORKERS,
+	    PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+
+	if (ctx->stats == MAP_FAILED) {
+		printf("Can't mmap area: %s\n", strerror(errno));
+		goto free_settings;
+	}
+
+	for (int i = 0; i < MAX_WORKERS; i++) {
+		ctx->stats[i].cycles = 0;
+	}
+
+	return (ctx);
+
+free_sems:
+	munmap(ctx->sems, sizeof(struct meter_semaphores));
+free_settings:
+	free(ctx->settings);
+free_ctx:
+	free(ctx);
+fail:
+	return (NULL);
+}
+
+static int
+lookup_test_callbacks(char *mode, worker_func *func)
+{
+	if (strcmp(mode, "open") == 0) {
+		func->init = &w_open_init;
+		func->job = &w_open_job;
+		func->opt = NULL;
+	} else if (strcmp(mode, "rename") == 0) {
+		func->init = &w_rename_init;
+		func->job = &w_rename_job;
+		func->opt = NULL;
+	} else if (strcmp(mode, "write_unlink") == 0) {
+		func->init = &w_write_unlink_init;
+		func->job = &w_write_unlink_job;
+		func->opt = NULL;
+	} else if (strcmp(mode, "write_sync") == 0) {
+		func->init = &w_write_sync_init;
+		func->job = &w_write_sync_job;
+		func->opt = &w_write_sync_option;
+	} else {
+		printf("Unknown worker job (-m): %s,"
+		       " use -h to see valid job names\n",
+		    mode);
+		return -1;
+	}
+	return (0);
 }
