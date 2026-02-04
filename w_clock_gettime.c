@@ -1,4 +1,9 @@
 
+#include <sys/types.h>
+#include <sys/resource.h>
+#include <sys/sched.h>
+#include <sys/time.h>
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -51,22 +56,23 @@ w_clock_gettime_init(struct meter_settings *s, int dirfd)
 long
 w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 {
-	enum { MEASURECYCLES = (1 << 14), HISTOSIZE = 32, MODEHISTOSIZE = 15 };
+	enum { MEASURECYCLES = (1 << 14), HISTOSIZE = 32, MODEHISTOSIZE = 31 };
 	struct timespec ts, tsprev;
 	uint64_t ps;
 	uint64_t ticks, prev, delta;
 	uint64_t sum, avg, avg2, t1, t2, max, t1_count, t2_count;
+	struct rusage rusage_before, rusage_after;
 
 	uint64_t *stats_base, *stats_ptr;
-	int histo[HISTOSIZE]; // exponentional histogram
-	int modehisto[2 * MODEHISTOSIZE +
-	    1]; // 7 before avg, 7 after avg, 1 - avg
+	uint64_t histo[HISTOSIZE];		   // exponentional histogram
+	uint64_t modehisto[2 * MODEHISTOSIZE + 1]; // near-avg
 
 	if (has_histo)
-		memset(histo, 0, HISTOSIZE * sizeof(int));
+		memset(histo, 0, HISTOSIZE * sizeof(uint64_t));
 
 	if (has_modehisto)
-		memset(modehisto, 0, (2 * MODEHISTOSIZE + 1) * sizeof(int));
+		memset(modehisto, 0,
+		    (2 * MODEHISTOSIZE + 1) * sizeof(uint64_t));
 
 	if (has_stats) {
 		stats_base = malloc(
@@ -115,7 +121,7 @@ w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 		t1_count = 0;
 		t2_count = 0;
 
-		prev = vi_tmGetTicks();
+		getrusage(RUSAGE_SELF, &rusage_before);
 		sum = 0;
 		for (long i = 0; i < s->settings->cycles; i++) {
 			prev = vi_tmGetTicks();
@@ -135,7 +141,16 @@ w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 
 			if (has_stats)
 				stats_base[i] = delta;
+
+			// for (volatile int zzz = 0; zzz < 256; zzz++)
+			// 	asm("");
+			//  if ((i & 0xf) == 0xf)
+			//  sched_yield();
 		}
+		getrusage(RUSAGE_SELF, &rusage_after);
+		printf("involuntary vs voluntary: %ld %ld\n",
+		    rusage_after.ru_nivcsw - rusage_before.ru_nivcsw,
+		    rusage_after.ru_nvcsw - rusage_before.ru_nvcsw);
 
 		if (s->settings->cycles > t1_count + t2_count) {
 			avg2 = sum /
@@ -214,7 +229,7 @@ w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 		break;
 	}
 
-	if (workerid == 0) {
+	if (workerid == s->settings->cpu_limit - 2) {
 		for (long i = 0; i < s->settings->cycles; i++) {
 			int j;
 
@@ -249,7 +264,7 @@ w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 
 			printf("[%d] ===== Log2 histogram ==== \n", workerid);
 			for (int i = first; i <= last; i++) {
-				printf("[%d]\t%d..%d\t= %d\n", workerid,
+				printf("[%d]\t%d..%d\t= %ld\n", workerid,
 				    (1 << (i - 1)), ((1 << (i)) - 1), histo[i]);
 			}
 		}
@@ -257,10 +272,29 @@ w_clock_gettime_job(int workerid, struct meter_worker_state *s, int dirfd)
 		if (has_modehisto) {
 			printf("[%d] ===== Near-avg values ==== \n", workerid);
 
+			int first = -1, last = -1;
 			for (int i = 0; i < 2 * MODEHISTOSIZE + 1; i++) {
-				printf("[%d] %ld \t= %d\n", workerid,
-				    (avg2 + i - MODEHISTOSIZE), modehisto[i]);
+				if (modehisto[i] > 0) {
+					if (first < 0) {
+						first = i;
+					}
+					last = i;
+				}
 			}
+
+			if (first > 0) {
+				first--;
+			}
+			if (last < 2 * MODEHISTOSIZE) {
+				last++;
+			}
+
+			if (first >= 0)
+				for (int i = first; i <= last; i++) {
+					printf("[%d] %ld \t= %ld\n", workerid,
+					    (avg2 + i - MODEHISTOSIZE),
+					    modehisto[i]);
+				}
 		}
 	}
 
