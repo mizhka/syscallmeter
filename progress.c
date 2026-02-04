@@ -13,6 +13,8 @@ timer_handler(int sig, siginfo_t *si, void *uc)
 	static long prev = 0;
 
 	struct timespec ts;
+	struct timespec ts2;
+
 	long total;
 
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
@@ -34,7 +36,9 @@ timer_handler(int sig, siginfo_t *si, void *uc)
 		total = -1;
 	}
 
-	printf("timespec: %ld.%09ld %ld\n", ts.tv_sec, ts.tv_nsec,
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts2);
+
+	printf("[%ld.%09ld] ops = %ld\n", ts.tv_sec, ts.tv_nsec,
 	    (total - prev));
 
 	prev = total;

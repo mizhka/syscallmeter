@@ -26,6 +26,7 @@
 
 #include "progress.h"
 #include "syscallmeter.h"
+#include "w_clock_gettime.h"
 #include "w_open.h"
 #include "w_rename.h"
 #include "w_write_sync.h"
@@ -127,11 +128,11 @@ main(int argc, char **argv)
 			printf("[%d] I\'m on CPU: %d\n", child, sched_getcpu());
 			sem_post(&(ctx->sems->fork_completed));
 			sem_wait(&(ctx->sems->starting));
-			clock_gettime(CLOCK_MONOTONIC_FAST, &ts_start);
+			clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
 			iter = func.job(i, &mystate, dirfd);
 
-			clock_gettime(CLOCK_MONOTONIC_FAST, &ts_end);
+			clock_gettime(CLOCK_MONOTONIC, &ts_end);
 
 			ts_end.tv_sec = ts_end.tv_sec - ts_start.tv_sec;
 			ts_end.tv_nsec = ts_end.tv_nsec - ts_start.tv_nsec;
@@ -146,8 +147,8 @@ main(int argc, char **argv)
 			    (double)(iter);
 
 			printf(
-			    "[%d / %ld] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
-			    child, i, iter, (long long)ts_end.tv_sec,
+			    "[%ld / %d] Worker is done with %ld in %lld.%.9ld sec (avg.time = %f ns)\n",
+			    i, child, iter, (long long)ts_end.tv_sec,
 			    ts_end.tv_nsec, speed);
 			return 0;
 		}
@@ -273,7 +274,7 @@ parse_opts(struct meter_ctx *mctx, int argc, char **argv)
 	mctx->settings->ncpu = MIN(MAX_WORKERS, mctx->settings->ncpu);
 
 	printf("Settings:\n");
-	printf("\tCYCLES = %d\n", mctx->settings->cycles);
+	printf("\tCYCLES = %ld\n", mctx->settings->cycles);
 	printf("\tWORKERS = %ld\n", mctx->settings->ncpu);
 	printf("\tFILECOUNT = %d\n", mctx->settings->file_count);
 	printf("\tFILESIZE = %d\n", mctx->settings->file_size);
@@ -442,6 +443,10 @@ lookup_test_callbacks(char *mode, worker_func *func)
 		func->init = &w_write_sync_init;
 		func->job = &w_write_sync_job;
 		func->opt = &w_write_sync_option;
+	} else if (strcmp(mode, "clock_gettime") == 0) {
+		func->init = &w_clock_gettime_init;
+		func->job = &w_clock_gettime_job;
+		func->opt = &w_clock_gettime_opt;
 	} else {
 		printf("Unknown worker job (-m): %s,"
 		       " use -h to see valid job names\n",

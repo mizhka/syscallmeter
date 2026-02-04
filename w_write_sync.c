@@ -148,7 +148,7 @@ w_write_sync_job(int workerid, struct meter_worker_state *s, int dirfd)
 	flags = O_CREAT | O_RDWR | (((w_params.direct != 0) ? O_DIRECT : 0));
 	fd = openat(dirfd, filename, flags, 0644);
 
-	for (int i = 0; i < s->settings->cycles; i++) {
+	for (long i = 0; i < s->settings->cycles; i++) {
 		DO_WORK(20);
 
 		DO_LOCK(&w_state->mx_write);

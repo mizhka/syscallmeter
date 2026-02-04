@@ -33,7 +33,7 @@ w_rename_job(int workerid, struct meter_worker_state *s, int dirfd)
 		return (-1);
 	}
 
-	for (int i = 0; i < s->settings->cycles; i++) {
+	for (long i = 0; i < s->settings->cycles; i++) {
 		for (int file_id = file_id_start; file_id < file_id_end;
 		    file_id++) {
 			sprintf(filename, FNAME, file_id);

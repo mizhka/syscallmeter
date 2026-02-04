@@ -22,7 +22,7 @@ w_open_job(int workerid, struct meter_worker_state *s, int dirfd)
 	char filename[128];
 	int fd;
 
-	for (int i = 0; i < s->settings->cycles; i++) {
+	for (long i = 0; i < s->settings->cycles; i++) {
 		for (int k = 0; k < s->settings->file_count; k++) {
 			sprintf(filename, FNAME, k);
 			fd = openat(dirfd, filename, O_RDWR);

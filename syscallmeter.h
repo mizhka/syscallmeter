@@ -12,7 +12,7 @@
  */
 typedef struct meter_settings {
 	int cpu_limit;
-	int cycles;
+	long cycles;
 	int file_count;
 	int file_size;
 	char *temp_dir;

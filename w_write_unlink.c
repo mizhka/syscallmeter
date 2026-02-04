@@ -28,7 +28,7 @@ w_write_unlink_job(int workerid, struct meter_worker_state *s, int dirfd)
 
 	char *data = alloc_rndbytes(s->settings->file_size);
 	sprintf(filename, FNAME, workerid);
-	for (int i = 0; i < s->settings->cycles; i++) {
+	for (long i = 0; i < s->settings->cycles; i++) {
 		fd = openat(dirfd, filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
 		if (fd < 0) {
 			printf("[%d] Can't create or open file %s: %s\n",
